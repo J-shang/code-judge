@@ -28,8 +28,15 @@ def _exec_set_alarm_timeout(timeout):
 # checking time limit exceed
 def _exec_time_exceeded(*_):
     print('Suicide from timeout.', flush=True)
-    os.kill(os.getpid(), signal.SIGKILL)  # sometime this can still fail
-    exit({TIMEOUT_EXIT_CODE})  # may not run here.
+    try:
+        os.killpg(0, signal.SIGKILL)  # sometime this can still fail
+    except Exception:
+        pass
+    try:
+        os.kill(0, signal.SIGKILL)  # sometime this can still fail
+    except Exception:
+        pass
+    os._exit({TIMEOUT_EXIT_CODE})  # may not run here.
 
 
 def _exec_set_max_runtime(seconds):
@@ -78,14 +85,19 @@ class PythonExecutor(ScriptExecutor):
 
     @contextmanager
     def setup_command(self, script: str):
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.py') as f:
-            f.write(PRE_TEMPLATE.format(timeout=self.timeout, memory_limit=self.memory_limit))
-            f.write("\n")
-            f.write(script)
-            f.write("\n")
-            f.write(POST_TEMPLATE)
-            f.flush()
-            yield shlex.split(self.run_cl.format(source=shlex.quote(f.name)))
+        with tempfile.TemporaryDirectory() as tmp_path:
+            source_path = f"{tmp_path}/source.py"
+            with open(source_path, mode='w') as f:
+                f.write(PRE_TEMPLATE.format(timeout=self.timeout, memory_limit=self.memory_limit))
+                f.write("\n")
+                f.write(script)
+                f.write("\n")
+                f.write(POST_TEMPLATE)
+                f.flush()
+            yield shlex.split(self.run_cl.format(
+                source=shlex.quote(source_path),
+                workdir=shlex.quote(str(tmp_path))
+            ))
 
     def process_result(self, result):
         if SCRIPT_ENDING_MARK in result.stdout:

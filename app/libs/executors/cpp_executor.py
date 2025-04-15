@@ -17,8 +17,9 @@ RESOURCE_LIMIT_TEMPLATE = """
 
 static void handler(int sig) {{
     printf("Time limit exceeded\\n");
-    kill(getpid(), SIGKILL);
-    exit({TIMEOUT_EXIT_CODE});
+    killpg(0, SIGKILL);
+    kill(0, SIGKILL);
+    _exit({TIMEOUT_EXIT_CODE});
 }}
 
 class ResourceLimit {{
@@ -74,13 +75,17 @@ class CppExecutor(ScriptExecutor):
                 shlex.split(
                     self.compiler_cl.format(
                         source=shlex.quote(source_path),
-                        exe=shlex.quote(exec_path))
-                ),
+                        exe=shlex.quote(exec_path),
+                        workdir=shlex.quote(str(tmp_path))
+                )),
                 timeout=self.timeout or None
             )
             if not result.success:
                 raise CompileError(result.stderr)
-            yield shlex.split(self.run_cl.format(exe=shlex.quote(exec_path)))
+            yield shlex.split(self.run_cl.format(
+                exe=shlex.quote(exec_path),
+                workdir=shlex.quote(str(tmp_path))
+            ))
 
     def execute_script(self, script, stdin=None, timeout=None):
         try:
