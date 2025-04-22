@@ -116,10 +116,10 @@ class Worker(Process):
                 1,
                 app_config.REDIS_WORKER_REGISTER_EXPIRE
             )
-            work_item = redis_queue.block_pop(app_config.REDIS_WORK_QUEUE_NAME, timeout=app_config.REDIS_WORK_QUEUE_BLOCK_TIMEOUT)
+            work_item = redis_queue.pqueue.block_pop(app_config.REDIS_WORK_QUEUE_NAME, timeout=app_config.REDIS_WORK_QUEUE_BLOCK_TIMEOUT)
             if not work_item:
                 continue
-            _, payload_json = work_item
+            _, payload_json, _ = work_item
 
             payload = None
             result = None
@@ -172,7 +172,7 @@ class Worker(Process):
                     logger.error(f'Failed to process work item {payload_json}')
                     continue
 
-            redis_queue.push(result_queue_name, result.model_dump_json())
+            redis_queue.queue.push(result_queue_name, result.model_dump_json())
             redis_queue.expire(
                 result_queue_name,
                 app_config.REDIS_RESULT_EXPIRE
@@ -232,7 +232,7 @@ class WorkerManager:
                     is_hanged = 0
                     for subp in worker_p.children(recursive=True):
                         is_busy = 1
-                        if subp.is_running() and time() - subp.create_time() > app_config.MAX_QUEUE_WAIT_TIME:
+                        if subp.is_running() and time() - subp.create_time() > app_config.MAX_PROCESS_TIME:
                             is_hanged = 1
                             logger.info(f'Worker {subp.pid} is running for {time() - subp.create_time()} seconds. Terminating...')
                             nothrow_killpg(pid=subp.pid)

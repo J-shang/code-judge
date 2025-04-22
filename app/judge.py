@@ -24,7 +24,7 @@ def _to_result(submission: Submission, start_time: float, result_json: tuple[str
         return SubmissionResult(sub_id=submission.sub_id, run_success=False, success=False, cost=time() - start_time, reason=ResultReason.QUEUE_TIMEOUT)
     else:
         result = SubmissionResult.model_validate_json(result_json[1])
-        if not result.success and result.cost >= app_config.MAX_EXECUTION_TIME:
+        if not result.run_success and result.cost >= app_config.MAX_EXECUTION_TIME:
             result.reason = ResultReason.WORKER_TIMEOUT
         return result
 
@@ -34,9 +34,9 @@ async def judge(redis_queue: RedisQueue, submission: Submission):
     try:
         payload = WorkPayload(submission=submission)
         payload_json = payload.model_dump_json()
-        await redis_queue.push(app_config.REDIS_WORK_QUEUE_NAME, payload_json)
+        await redis_queue.pqueue.push(app_config.REDIS_WORK_QUEUE_NAME, {payload_json: time()})
         result_queue_name = f'{app_config.REDIS_RESULT_PREFIX}{payload.work_id}'
-        result_json = await redis_queue.block_pop(result_queue_name, timeout=app_config.MAX_QUEUE_WAIT_TIME)
+        result_json = await redis_queue.queue.block_pop(result_queue_name, timeout=app_config.MAX_QUEUE_WAIT_TIME)
         await redis_queue.delete(result_queue_name)
         return _to_result(submission, start_time, result_json)
     except Exception:
@@ -52,20 +52,20 @@ async def _judge_batch_impl(redis_queue: RedisQueue, subs: list[Submission], lon
         if long_batch else app_config.MAX_BATCH_CHUNK_SIZE
     # use a hash tag to make sure all payloads are in the same slot in redis cluster
     hash_tag = '{' + str(uuid.uuid4()) + '}'
-    payloads = [WorkPayload(work_id=f'{hash_tag}:{idx}', submission=sub, long_running=long_batch) for idx, sub in enumerate(subs)]
-    payload_chunks = list(chunkify(payloads, batch_chunk_size))
+    sub_chunks = chunkify(subs, batch_chunk_size)
 
     async def _submit(payloads: list[WorkPayload]):
-        payload_jsons = [payload.model_dump_json() for payload in payloads]
-        await redis_queue.push(app_config.REDIS_WORK_QUEUE_NAME, *payload_jsons)
+        # payload.work_id is different, so we can safely use dict
+        payload_jsons = {payload.model_dump_json(): payload.timestamp for payload in payloads}
+        await redis_queue.pqueue.push(app_config.REDIS_WORK_QUEUE_NAME, payload_jsons)
 
     async def _sync_pop(queue_names: list[str]):
-        step_results = await redis_queue.pop_multi(*queue_names)
+        step_results = await redis_queue.queue.pop_multi(*queue_names)
         name_results = [(k, v) for k, v in zip(queue_names, step_results) if v is not None]
         return name_results
 
     async def _async_pop(queue_names: list[str], timeout: int):
-        name_result = await redis_queue.block_pop(*queue_names, timeout=timeout)
+        name_result = await redis_queue.queue.block_pop(*queue_names, timeout=timeout)
         if name_result is not None:
             return [(name_result[0].decode(), name_result[1])]
         return []
@@ -73,7 +73,7 @@ async def _judge_batch_impl(redis_queue: RedisQueue, subs: list[Submission], lon
     async def _pop_results(queue_names: list[str], timeout: int):
         name_results = await _sync_pop(queue_names)
         if not name_results and timeout > 0:
-            name_results = await _async_pop(queue_names, min(timeout, app_config.MAX_QUEUE_WAIT_TIME))
+            name_results = await _async_pop(queue_names, min(timeout, app_config.MAX_PROCESS_TIME))
         return name_results
 
     async def _get_result(payloads: list[WorkPayload], max_chunk_wait_time):
@@ -96,18 +96,25 @@ async def _judge_batch_impl(redis_queue: RedisQueue, subs: list[Submission], lon
             name_results = await _pop_results(left_result_queue_names, left_time)
             if not name_results: # if no result, check if timeout
                 if start_working_time == 0:
-                    next_payload_json = await redis_queue.peak(app_config.REDIS_WORK_QUEUE_NAME)
-                    if not next_payload_json:
+                    # the queue is ordered by timestamp
+                    next_payload_info = await redis_queue.pqueue.peak(app_config.REDIS_WORK_QUEUE_NAME)
+                    if not next_payload_info:
                         start_working_time = time()
                     else:
-                        next_payload = WorkPayload.model_validate_json(next_payload_json)
-                        if next_payload.timestamp > max_timestamp:
+                        # before next_work_timestamp, all work is done or processing.
+                        # so if it is bigger than max_timestamp, we can assume all work is done or in progress.
+                        next_work_timestamp = next_payload_info[1]
+                        if next_work_timestamp > max_timestamp:
                             start_working_time = time()
                 else:
-                    if time() - start_working_time > app_config.MAX_QUEUE_WAIT_TIME:
+                    # if start_working_time is set, it means all work is done or in progress.
+                    # so we only wait for app_config.MAX_PROCESS_TIME for them to finish.
+                    # if it is still not finished, we assume some error happened.
+                    # and we can break the loop.
+                    if time() - start_working_time > app_config.MAX_PROCESS_TIME:
                         logger.warning(f'No result for {len(left_result_queue_names)} submissions. '
                                        f'Assuming all submissions are timed out.')
-                        logger.warning('This is mostly caused by redis (OOM or other issues). ')
+                        logger.warning('This is mostly caused by redis OOM or workers killed or potential bug. ')
                         break
             else:
                 start_working_time = 0
@@ -130,8 +137,14 @@ async def _judge_batch_impl(redis_queue: RedisQueue, subs: list[Submission], lon
         return [results[result_queue_name] for result_queue_name in result_queue_names]
 
     # submit all submissions to the queue
-    for chunk in payload_chunks:
-        await _submit(chunk)
+    payload_chunks = []
+    for sub_chunk_id, sub_chunk in enumerate(sub_chunks):
+        payload_chunk = [
+            WorkPayload(work_id=f'{hash_tag}:{sub_chunk_id}-{idx}', submission=sub, long_running=long_batch)
+            for idx, sub in enumerate(sub_chunk)
+        ]
+        payload_chunks.append(payload_chunk)
+        await _submit(payload_chunk)
 
     results = []
     wait_start_time = time()

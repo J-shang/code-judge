@@ -295,48 +295,102 @@ If you don't want to use them, you can also run workers/api in multiple machines
 2. Run workers in all worker nodes with the same redis uri. You can reuse the training servers, as workers don't use GPU.
 3. Run api in api nodes with the same redis uri. You can use one api node or multiple api nodes.
 
+Some typical deployment scenarios are:
+
+## Global Redis Server and CPU farm
+
+Ideally, you can setup a redis server that accessible from workers and training machines, and run the workers in a cpu farm. This is the most flexible and scalable solution.
+
+1. Setup a redis server in training cluster or use a cloud redis server.
+2. Run workers in all worker nodes with the same redis uri.
+3. Run api in training nodes/cluster with the same redis uri.
+
+## Local Redis Server and Local CPU
+
+Sometimes the training machines are not connected to each other with http. In this case, you can run redis server, the api and workers in the same machine.
+
+1. Setup a redis server in every training machine
+2. Run workers in every training machine with local redis uri.
+3. Run api in every training machine with local redis uri.
+
 
 # Client Implementation
 
-1. Batch API is preferred.
+You can check the example client implementation in `judge_client.py`.
+
+1. Long-Batch API is preferred.
 2. To make your client more robust, you'd better:
   - check http status code. We are trying to always return 200, but it is not guaranteed.
-  - check the `reason` field in the response. For example, `queue_timeout` means the workers are busy. You should reduce the concurrent requests.
+  - check the `reason` field in the response. For example, `queue_timeout` means the workers are busy or something goes wrong. You should reduce the concurrent requests and retry.
   - make sure you have set timeout for the request(i.e.`requests.post(..., timeout=...)`). If you use long-batch api, the timeout should be long enough to wait for the workers to finish.
 3. You should check the log of the api and workers to see if there are any errors.
 
-# Run code in a container(sandbox)
+# Run code in a sandbox
 
-The default configuration is to run the code in the host, which is not safe. We make it default because you can use it everywhere (even when the host is a docker container.), and it is much faster than running in a container.
+The default configuration is to run the code in the host, which is not safe. We make it default because you can use it everywhere (even when the host is a docker container.), and it is much faster than running in a sandbox.
 
-If you want to run the code in a container, you can write a shell script to execute python/cpp code (by setting `PYTHON_EXECUTE_COMMAND`, `CPP_COMPILE_COMMAND` and `CPP_EXECUTE_COMMAND`) in a new docker container.
+If you want to run the code in a sandbox, you can customize `PYTHON_EXECUTE_COMMAND`, `CPP_COMPILE_COMMAND` and `CPP_EXECUTE_COMMAND` environment variables to run the code in a sandbox. Please note that almost all sandboxes can only run directly on host, and they are not supported in unprivileged docker container (except `Bubblewrap`, which can be used in some unprivileged environment).
 
+Here are some popular sandboxes you can use. Docker/Podman is safest but slowest, and firejail/bubblewrap is fast but less safe. You can choose the one that fits your needs.
+
+## Docker/Podman
 Note:
-1. the worker manager (run_workers.py) should run as root user unless you use rootless docker/podman.
-2. It will be much slower than running in the host, because it needs to create a new container for each request. You may want to consider `crun` to make it faster.
+  1. the worker manager (run_workers.py) should run as root user unless you use rootless docker/podman.
+  2. It will be much slower than running in the host, because it needs to create a new container for each request.
 
 
-## Python
-
-Assume you have a docker image with python and popular packages installed, and the image name is `python:code-judge`.
+Assume you have a docker image with python and popular packages installed, and the image name is `python:code-judge`, and you have a docker image with cpp and popular c++ libraries installed, and the image name is `cpp:code-judge`.
 
 You can set
 ```bash
 PYTHON_EXECUTE_COMMAND='docker run -i --rm -v /tmp:/tmp --entrypoint python3 python:code-judge {source}'
-```
-to run the python code in a container.
 
-## C++
-
-Assume you have a docker image with cpp and popular c++ libraries installed, and the image name is `cpp:code-judge`.
-
-You can set
-```bash
 CPP_COMPILE_COMMAND='docker run -i --rm -v /tmp:/tmp --entrypoint g++ cpp:code-judge -O2 -o {exe} {source}'
-```
-and
-```bash
+
 CPP_EXECUTE_COMMAND='docker run -i --rm -v /tmp:/tmp --entrypoint {exe} cpp:code-judge'
 ```
-to compile and run the cpp code in a container.
+to run code in containers.
 
+## Firejail
+You can also use firejail to run the code in a sandbox. You need to install firejail first.
+```bash
+sudo apt-get install firejail
+```
+And then you can set
+```bash
+PYTHON_EXECUTE_COMMAND='firejail --read-only=/ --net=none --whitelist={workdir} --quiet -- python3 {source}'
+
+CPP_COMPILE_COMMAND='firejail --read-only=/ --net=none --whitelist={workdir} --quiet -- g++ -O2 -o {exe} {source}'
+
+CPP_EXECUTE_COMMAND='firejail --read-only=/ --net=none --whitelist={workdir} --quiet -- {exe}'
+```
+Which means:
+- `--read-only=/` means the container can only read the root filesystem.
+- `--net=none` means the container has no network access.
+- `--whitelist={workdir}` means the container can read and write the workdir.
+- `--quiet` means the container will not print any output.
+- `--` means the following command will be executed in the container.
+
+You can customize the command to your needs.
+
+## Bubblewrap
+
+You can also use bubblewrap to run the code in a sandbox. You need to install bubblewrap first.
+```bash
+sudo apt-get install bubblewrap
+```
+And then you can set
+```bash
+PYTHON_EXECUTE_COMMAND='bwrap --ro-bind / / --unshare-all --dev-bind /dev /dev --die-with-parent --bind {workdir} {workdir} -- python3 {source}'
+CPP_COMPILE_COMMAND='bwrap --ro-bind / / --unshare-all --dev-bind /dev /dev --die-with-parent --bind {workdir} {workdir} -- g++ -O2 -o {exe} {source}'
+CPP_EXECUTE_COMMAND='bwrap --ro-bind / / --unshare-all --dev-bind /dev /dev --die-with-parent --bind {workdir} {workdir} -- {exe}'
+```
+Where:
+- `--ro-bind / /` means the container can only read the root filesystem.
+- `--dev-bind /dev /dev` means the container can read and write the /dev filesystem.
+- `--unshare-all` means the container will be unshared from the host.
+- `--die-with-parent` means the container will die when the parent process dies.
+- `--bind {workdir} {workdir}` means the container can read and write the workdir.
+- `--` means the following command will be executed in the container.
+
+You can customize the command to your needs.
