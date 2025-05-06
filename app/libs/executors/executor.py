@@ -111,6 +111,9 @@ class ScriptExecutor(ProcessExecutor):
         return result
 
     def execute_script(self, script: str, stdin: str | None = None, timeout: float | None = None) -> ProcessExecuteResult:
+        # add 1 second to timeout as the overhead of the pre/post processing
+        timeout = timeout + 1 if timeout else None
+
         with tempfile.TemporaryDirectory() as tmp_path:
             gen_command = self.setup_command(tmp_path, script)
             command = next(gen_command)
