@@ -14,3 +14,4 @@ def compute_score(model_output: str, ground_truth: str) -> bool:
             return 1.0
     except Exception as e:
         return 0.0
+    return 0.0
