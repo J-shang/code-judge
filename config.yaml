@@ -18,7 +18,7 @@ tools:
             echo "[skip] repl already exists"
           else
             cd app/libs/external_repository/
-            git clone https://github.com/leanprover-community/repl.git
+            git clone --branch "v4.15.0" --single-branch --depth 1 "https://github.com/leanprover-community/repl.git" "repl"
           fi
       - type: shell
         name: "write dependency to lakefile.toml for repl"
@@ -27,7 +27,8 @@ tools:
           echo '' >> lakefile.toml
           echo '[[require]]' >> lakefile.toml
           echo 'name = "mathlib"' >> lakefile.toml
-          echo 'scope = "leanprover-community"' >> lakefile.toml
+          echo 'git = "https://github.com/leanprover-community/mathlib4.git"' >> lakefile.toml
+          echo 'rev = "v4.15.0"' >> lakefile.toml
       - type: shell
         name: "build repl"
         run: |
