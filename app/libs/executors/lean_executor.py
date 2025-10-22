@@ -80,9 +80,9 @@ class LeanExecutor(ScriptExecutor):
             # If there are any errors or sorries, return false      
             if len(sorries) > 0 or len(errors) > 0:
                 result.stderr = result.stdout
-                result.stdout =  'fail'
+                result.stdout = 'Verification Failed'
             else:
-                result.stdout = 'pass'
+                result.stdout = 'Verification Successful'
         except Exception as e:
             result.stderr = f"Error processing result: {e}"
             return result
