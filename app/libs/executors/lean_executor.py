@@ -82,7 +82,8 @@ class LeanExecutor(ScriptExecutor):
                 result.stderr = result.stdout
                 result.stdout = 'Verification Failed'
             else:
-                result.stdout = 'Verification Successful'
+                if result.success:
+                    result.stdout = 'Verification Successful'
         except Exception as e:
             result.stderr = f"Error processing result: {e}"
             return result
